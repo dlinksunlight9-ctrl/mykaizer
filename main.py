@@ -5,6 +5,7 @@ import gzip
 import re
 import os
 from flask import Flask, jsonify, request, render_template
+import threading
 
 app = Flask(__name__)
 
@@ -24,6 +25,10 @@ TOKENS = [token.strip() for token in TOKENS if token.strip()]
 DEFAULT_TARGET = 10000
 
 timeout = aiohttp.ClientTimeout(total=10)
+
+# Global variable to track if bot is running
+bot_running = False
+bot_thread = None
 
 def get_headers(token):
     return {
@@ -90,7 +95,7 @@ async def worker(token, target, name):
             print(f"[{name}] Invalid token. Skipping.")
             return
 
-        while True:
+        while bot_running:
             balance = await check_balance(session, headers, name)
             if balance is None:
                 print(f"[{name}] Failed to fetch balance. Retry...")
@@ -114,8 +119,29 @@ async def worker(token, target, name):
             print(f"[{name}] Spins success: {spins}")
             await asyncio.sleep(1)
 
-# Global variable to track if bot is running
-bot_running = False
+async def run_workers(tokens, target):
+    tasks = [
+        worker(token, target, f"Acc{i+1}")
+        for i, token in enumerate(tokens)
+    ]
+    
+    try:
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        print(f"Error in bot execution: {e}")
+    
+    global bot_running
+    bot_running = False
+    print("Bot has stopped")
+
+def run_bot_async(tokens, target):
+    """Run the bot in a separate thread with its own event loop"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_workers(tokens, target))
+    finally:
+        loop.close()
 
 @app.route('/')
 def home():
@@ -123,7 +149,7 @@ def home():
 
 @app.route('/run', methods=['POST'])
 def run_bot():
-    global bot_running
+    global bot_running, bot_thread
     
     if bot_running:
         return jsonify({"error": "Bot is already running"}), 400
@@ -138,9 +164,11 @@ def run_bot():
     if not TOKENS:
         return jsonify({"error": "No tokens provided"}), 400
     
-    # Run the bot asynchronously
+    # Run the bot in a separate thread
     bot_running = True
-    asyncio.create_task(run_workers(TOKENS, target))
+    bot_thread = threading.Thread(target=run_bot_async, args=(TOKENS, target))
+    bot_thread.daemon = True
+    bot_thread.start()
     
     return jsonify({
         "status": "started",
@@ -161,22 +189,6 @@ def stop_bot():
     global bot_running
     bot_running = False
     return jsonify({"status": "stopping", "message": "Bot will stop after current operations"})
-
-async def run_workers(tokens, target):
-    global bot_running
-    
-    tasks = [
-        worker(token, target, f"Acc{i+1}")
-        for i, token in enumerate(tokens)
-    ]
-    
-    try:
-        await asyncio.gather(*tasks)
-    except Exception as e:
-        print(f"Error in bot execution: {e}")
-    
-    bot_running = False
-    print("Bot has stopped")
 
 if __name__ == "__main__":
     # Create templates directory if it doesn't exist
